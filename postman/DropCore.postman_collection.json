@@ -1,0 +1,480 @@
+{
+  "info": {
+    "_postman_id": "b9a71992-df45-44dc-8ae7-d7dc6722dc1d",
+    "name": "DropCore API - Phase 1",
+    "description": "# DropCore Phase 1\n\nTests the Create a Hold contract against a local DropCore instance.\n\n## Before running\n\n1. Start PostgreSQL with `docker compose up -d`.\n2. Start DropCore with `mvn spring-boot:run`.\n3. Load `dev/seed.sql` if the demo event is not present.\n4. Select the **DropCore Local** environment.\n\n## Recommended workflow\n\nRun the requests in order, or run the entire collection. **1 - Create a new hold** generates a fresh customer UUID and idempotency keys for each run. The following requests reuse those values to verify successful replay and the one-active-reservation rule.\n\nNo request body is sent because Phase 1 always requests exactly one ticket.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Service health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/actuator/health",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "actuator",
+            "health"
+          ]
+        },
+        "description": "Checks that the Spring Boot application is running and can reach its configured dependencies. Expected response: `200 OK` with status `UP`."
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Health endpoint returns 200', function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test('Application reports UP', function () {",
+              "    pm.expect(pm.response.json().status).to.eql('UP');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "response": []
+    },
+    {
+      "name": "Create a hold workflow",
+      "description": "Run these requests in order. The first request initializes fresh run-specific values; the replay and conflict requests deliberately reuse them.",
+      "item": [
+        {
+          "name": "1 - Create a new hold",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// A fresh customer makes this request repeatable across collection runs.",
+                  "const runId = Date.now().toString();",
+                  "pm.environment.set('customerId', pm.variables.replaceIn('{{$guid}}'));",
+                  "pm.environment.set('idempotencyKey', `postman-hold-${runId}`);",
+                  "pm.environment.set('alternativeIdempotencyKey', `postman-hold-${runId}-other`);",
+                  "pm.environment.unset('reservationId');",
+                  "pm.environment.unset('originalExpiresAt');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('First request returns 201 Created', function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;",
+                  "",
+                  "pm.test('Response is a HELD reservation for the requested event', function () {",
+                  "    pm.expect(body.reservationId).to.match(uuidPattern);",
+                  "    pm.expect(body.eventId).to.eql(pm.environment.get('eventId'));",
+                  "    pm.expect(body.status).to.eql('HELD');",
+                  "    pm.expect(Date.parse(body.expiresAt)).to.be.above(Date.now());",
+                  "});",
+                  "",
+                  "pm.test('Location identifies the new reservation', function () {",
+                  "    pm.expect(pm.response.headers.get('Location')).to.eql(`/v1/reservations/${body.reservationId}`);",
+                  "});",
+                  "",
+                  "// These values are used to prove that replay returns the original snapshot.",
+                  "pm.environment.set('reservationId', body.reservationId);",
+                  "pm.environment.set('originalExpiresAt', body.expiresAt);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Demo-Customer-Id",
+                "value": "{{customerId}}",
+                "description": "Local-development identity only. This is not production authentication.",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}",
+                "description": "Opaque retry key. Must contain 1 to 128 characters.",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/events/{{eventId}}/reservations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "events",
+                "{{eventId}}",
+                "reservations"
+              ]
+            },
+            "description": "Creates one five-minute ticket hold. There is intentionally no request body in v1. A new successful request returns `201 Created` and stores the reservation ID and expiry for subsequent assertions."
+          },
+          "response": []
+        },
+        {
+          "name": "2 - Replay the same hold request",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Successful replay returns 200 OK', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const body = pm.response.json();",
+                  "pm.test('Replay returns the original result snapshot', function () {",
+                  "    pm.expect(body.reservationId).to.eql(pm.environment.get('reservationId'));",
+                  "    pm.expect(body.eventId).to.eql(pm.environment.get('eventId'));",
+                  "    pm.expect(body.status).to.eql('HELD');",
+                  "    pm.expect(body.expiresAt).to.eql(pm.environment.get('originalExpiresAt'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Demo-Customer-Id",
+                "value": "{{customerId}}",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/events/{{eventId}}/reservations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "events",
+                "{{eventId}}",
+                "reservations"
+              ]
+            },
+            "description": "Retries the exact same operation with the same idempotency key. Expected response: `200 OK`, with the same reservation ID and original expiry timestamp as request 1."
+          },
+          "response": []
+        },
+        {
+          "name": "3 - Reject a second active hold",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Second key for the same customer returns 409', function () {",
+                  "    pm.response.to.have.status(409);",
+                  "});",
+                  "",
+                  "pm.test('Error is ACTIVE_RESERVATION_EXISTS', function () {",
+                  "    const body = pm.response.json();",
+                  "    pm.expect(body.code).to.eql('ACTIVE_RESERVATION_EXISTS');",
+                  "    pm.expect(body.message).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Demo-Customer-Id",
+                "value": "{{customerId}}",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{alternativeIdempotencyKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/events/{{eventId}}/reservations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "events",
+                "{{eventId}}",
+                "reservations"
+              ]
+            },
+            "description": "Uses a different idempotency key for the customer who already owns a HELD reservation. Expected response: `409 Conflict` with `ACTIVE_RESERVATION_EXISTS`. This finalized business outcome is persisted for replay."
+          },
+          "response": []
+        },
+        {
+          "name": "4 - Replay the active-reservation conflict",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Finalized conflict replays as 409', function () {",
+                  "    pm.response.to.have.status(409);",
+                  "    pm.expect(pm.response.json().code).to.eql('ACTIVE_RESERVATION_EXISTS');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Demo-Customer-Id",
+                "value": "{{customerId}}",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{alternativeIdempotencyKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/events/{{eventId}}/reservations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "events",
+                "{{eventId}}",
+                "reservations"
+              ]
+            },
+            "description": "Repeats request 3 to demonstrate that finalized `409` business outcomes are idempotently replayed."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Validation and error cases",
+      "description": "Independent negative tests. They use dynamic UUIDs where appropriate and do not depend on the successful workflow.",
+      "item": [
+        {
+          "name": "Missing Idempotency-Key",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Missing key returns a JSON 400 error', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(pm.response.json().code).to.eql('INVALID_REQUEST');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Demo-Customer-Id",
+                "value": "{{$guid}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/events/{{eventId}}/reservations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "events",
+                "{{eventId}}",
+                "reservations"
+              ]
+            },
+            "description": "Omits the required idempotency header. Expected response: `400 Bad Request` with `INVALID_REQUEST`."
+          },
+          "response": []
+        },
+        {
+          "name": "Invalid customer UUID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Invalid identity returns a JSON 400 error', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(pm.response.json().code).to.eql('INVALID_REQUEST');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Demo-Customer-Id",
+                "value": "not-a-uuid",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "invalid-customer-test",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/events/{{eventId}}/reservations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "events",
+                "{{eventId}}",
+                "reservations"
+              ]
+            },
+            "description": "Supplies a malformed local customer identity. Expected response: `400 Bad Request` with `INVALID_REQUEST`."
+          },
+          "response": []
+        },
+        {
+          "name": "Idempotency key exceeds 128 characters",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Oversized key returns a JSON 400 error', function () {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(pm.response.json().code).to.eql('INVALID_REQUEST');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Demo-Customer-Id",
+                "value": "{{$guid}}",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "description": "Exactly 129 ASCII characters.",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/events/{{eventId}}/reservations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "events",
+                "{{eventId}}",
+                "reservations"
+              ]
+            },
+            "description": "Checks the contract's 128-character upper bound. Expected response: `400 Bad Request` with `INVALID_REQUEST`."
+          },
+          "response": []
+        },
+        {
+          "name": "Event does not exist",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Unknown event returns 404', function () {",
+                  "    pm.response.to.have.status(404);",
+                  "    pm.expect(pm.response.json().code).to.eql('EVENT_NOT_FOUND');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Demo-Customer-Id",
+                "value": "{{$guid}}",
+                "type": "text"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "unknown-event-{{$timestamp}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/v1/events/{{unknownEventId}}/reservations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "events",
+                "{{unknownEventId}}",
+                "reservations"
+              ]
+            },
+            "description": "Targets a valid UUID that is deliberately absent from the demo data. Expected response: `404 Not Found` with `EVENT_NOT_FOUND`."
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "pm.request.headers.upsert({ key: 'Accept', value: 'application/json' });"
+        ]
+      }
+    }
+  ],
+  "variable": []
+}
